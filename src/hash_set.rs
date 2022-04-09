@@ -1,11 +1,10 @@
 //! A hash set implemented as a `HashMap` where the value is `()`.
 
-pub use std::collections::hash_set::{Drain, Iter};
+pub use std::collections::hash_set::{Drain, IntoIter, Iter};
 
 use crate::AllocError;
 use crate::FxBuildHasher;
 use std::borrow::Borrow;
-use std::collections::hash_map::RandomState;
 use std::collections::HashSet as StdHashSet;
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
@@ -125,8 +124,11 @@ where
     /// The hash set will be able to hold at least `capacity` elements without
     /// reallocating. If `capacity` is 0, the hash set will not allocate.
     #[inline]
-    pub fn try_with_capacity(capacity: usize) -> Result<HashSet<T, RandomState>, AllocError> {
-        let mut set = StdHashSet::new();
+    pub fn try_with_capacity(capacity: usize) -> Result<HashSet<T, S>, AllocError>
+    where
+        S: Default,
+    {
+        let mut set = StdHashSet::with_hasher(Default::default());
         set.try_reserve(capacity)?;
         Ok(HashSet(set))
     }
@@ -278,5 +280,100 @@ where
     #[inline]
     fn default() -> HashSet<T, S> {
         HashSet::with_hasher(Default::default())
+    }
+}
+
+impl<'a, T, S> IntoIterator for &'a HashSet<T, S> {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+
+    #[inline]
+    fn into_iter(self) -> Iter<'a, T> {
+        self.iter()
+    }
+}
+
+impl<T, S> IntoIterator for HashSet<T, S> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    /// Creates a consuming iterator, that is, one that moves each value out
+    /// of the set in arbitrary order. The set cannot be used after calling
+    /// this.
+    #[inline]
+    fn into_iter(self) -> IntoIter<T> {
+        self.0.into_iter()
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde {
+    use crate::HashSet;
+    use serde::de::{SeqAccess, Visitor};
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use std::fmt;
+    use std::hash::{BuildHasher, Hash};
+    use std::marker::PhantomData;
+
+    impl<T, H> Serialize for HashSet<T, H>
+    where
+        T: Eq + Hash + Serialize,
+        H: BuildHasher,
+    {
+        #[inline]
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serializer.collect_seq(self)
+        }
+    }
+
+    impl<'de, T, H> Deserialize<'de> for HashSet<T, H>
+    where
+        T: Eq + Hash + Deserialize<'de>,
+        H: BuildHasher + Default + Deserialize<'de>,
+    {
+        #[inline]
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            struct SeqVisitor<T, H> {
+                _marker: PhantomData<HashSet<T, H>>,
+            }
+
+            impl<'de, T, H> Visitor<'de> for SeqVisitor<T, H>
+            where
+                T: Eq + Hash + Deserialize<'de>,
+                H: BuildHasher + Default + Deserialize<'de>,
+            {
+                type Value = HashSet<T, H>;
+
+                #[inline]
+                fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                    formatter.write_str("a sequence")
+                }
+
+                #[inline]
+                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: SeqAccess<'de>,
+                {
+                    let cap = seq.size_hint().unwrap_or(8).min(4096);
+                    let mut values =
+                        HashSet::try_with_capacity_and_hasher(cap, H::default()).map_err(A::Error::custom)?;
+
+                    while let Some(value) = seq.next_element()? {
+                        values.try_insert(value).map_err(A::Error::custom)?;
+                    }
+
+                    Ok(values)
+                }
+            }
+
+            let visitor = SeqVisitor { _marker: PhantomData };
+            deserializer.deserialize_seq(visitor)
+        }
     }
 }

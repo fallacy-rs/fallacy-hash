@@ -1,6 +1,8 @@
 //! A hash map implemented with quadratic probing.
 
-pub use std::collections::hash_map::{Drain, Entry, IntoKeys, IntoValues, Iter, IterMut, Keys, Values, ValuesMut};
+pub use std::collections::hash_map::{
+    Drain, Entry, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys, Values, ValuesMut,
+};
 
 use crate::AllocError;
 use crate::FxBuildHasher;
@@ -382,5 +384,113 @@ where
     #[inline]
     fn index(&self, key: &Q) -> &V {
         self.0.index(key)
+    }
+}
+
+impl<'a, K, V, S> IntoIterator for &'a HashMap<K, V, S> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = Iter<'a, K, V>;
+
+    #[inline]
+    fn into_iter(self) -> Iter<'a, K, V> {
+        self.iter()
+    }
+}
+
+impl<'a, K, V, S> IntoIterator for &'a mut HashMap<K, V, S> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = IterMut<'a, K, V>;
+
+    #[inline]
+    fn into_iter(self) -> IterMut<'a, K, V> {
+        self.iter_mut()
+    }
+}
+
+impl<K, V, S> IntoIterator for HashMap<K, V, S> {
+    type Item = (K, V);
+    type IntoIter = IntoIter<K, V>;
+
+    /// Creates a consuming iterator, that is, one that moves each key-value
+    /// pair out of the map in arbitrary order. The map cannot be used after
+    /// calling this.
+    #[inline]
+    fn into_iter(self) -> IntoIter<K, V> {
+        self.0.into_iter()
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde {
+    use crate::HashMap;
+    use serde::de::{MapAccess, Visitor};
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use std::fmt;
+    use std::hash::{BuildHasher, Hash};
+    use std::marker::PhantomData;
+
+    impl<K, V, H> Serialize for HashMap<K, V, H>
+    where
+        K: Eq + Hash + Serialize,
+        V: Serialize,
+        H: BuildHasher,
+    {
+        #[inline]
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            serializer.collect_map(self)
+        }
+    }
+
+    impl<'de, K, V, H> Deserialize<'de> for HashMap<K, V, H>
+    where
+        K: Eq + Hash + Deserialize<'de>,
+        V: Deserialize<'de>,
+        H: BuildHasher + Default + Deserialize<'de>,
+    {
+        #[inline]
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            struct MapVisitor<K, V, H> {
+                _marker: PhantomData<HashMap<K, V, H>>,
+            }
+
+            impl<'de, K, V, H> Visitor<'de> for MapVisitor<K, V, H>
+            where
+                K: Eq + Hash + Deserialize<'de>,
+                V: Deserialize<'de>,
+                H: BuildHasher + Default + Deserialize<'de>,
+            {
+                type Value = HashMap<K, V, H>;
+
+                #[inline]
+                fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                    formatter.write_str("a map")
+                }
+
+                #[inline]
+                fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+                where
+                    A: MapAccess<'de>,
+                {
+                    let cap = map.size_hint().unwrap_or(8).min(4096);
+                    let mut values =
+                        HashMap::try_with_capacity_and_hasher(cap, H::default()).map_err(A::Error::custom)?;
+
+                    while let Some((key, value)) = map.next_entry()? {
+                        values.try_insert(key, value).map_err(A::Error::custom)?;
+                    }
+
+                    Ok(values)
+                }
+            }
+
+            let visitor = MapVisitor { _marker: PhantomData };
+            deserializer.deserialize_map(visitor)
+        }
     }
 }
